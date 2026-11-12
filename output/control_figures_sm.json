@@ -1,0 +1,45 @@
+{
+  "group_revenue": 28301607.81,
+  "group_profit": 2832780.96,
+  "profit_owners": 2771922.9,
+  "profit_nci": 60858.06,
+  "nci_closing": 1325107.53,
+  "goodwill_closing": 1375815.07,
+  "translation_reserve_movement": 43706.7,
+  "total_assets": 28575272.93,
+  "total_equity": 18407835.06,
+  "intercompany_difference": {
+    "total_usd": 10160.0,
+    "timing_in_transit_gbp": 8108.54,
+    "fx_retranslation_gbp": 11957.88,
+    "pl_elimination_fx_difference_gbp": 1966.21,
+    "causes": {
+      "timing_in_transit": {
+        "doc_ref": "INV-US-2291",
+        "amount_usd": 10160.0,
+        "amount_gbp": 8108.54,
+        "explanation": "Invoice dated 2024-12-31 billed by US but unrecorded by UK at year end"
+      },
+      "foreign_currency_retranslation": {
+        "amount_usd": 629840.0,
+        "fx_loss_gbp": 11957.88,
+        "explanation": "Retranslation of UK USD monetary liability to closing rate per Policy 3"
+      },
+      "exchange_difference_on_pl_elimination": {
+        "us_fee_income_gbp": 500782.47,
+        "uk_fee_expense_gbp": 498816.26,
+        "exchange_diff_gbp": 1966.21,
+        "explanation": "Difference between US average rate translation and UK booked charges per Policy 5"
+      }
+    }
+  },
+  "sgd_bank_gbp": {
+    "value": null,
+    "reason": "Missing closing exchange rate for GBP/SGD at 31 Dec 2024 in fx_rates.csv. Per Group Policy 3, foreign currency monetary bank balances must be retranslated at closing rate, but neither a direct GBP/SGD closing rate nor synthetic cross-rate is provided in inputs."
+  },
+  "journals": {
+    "posted": 16,
+    "rejected": 2,
+    "held_for_review": 2
+  }
+}

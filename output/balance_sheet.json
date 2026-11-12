@@ -1,0 +1,46 @@
+{
+  "statement": "Consolidated Balance Sheet",
+  "as_of": "2024-12-31",
+  "presentation_currency": "GBP",
+  "assets": {
+    "current_assets": {
+      "cash_and_cash_equivalents": 7810225.9,
+      "trade_receivables": 6665436.66,
+      "inventory": 3218502.18,
+      "prepayments": 497942.01,
+      "total_current_assets": 18192106.75
+    },
+    "non_current_assets": {
+      "property_plant_and_equipment_cost": 13174020.23,
+      "property_plant_and_equipment_accumulated_depreciation": 4166669.12,
+      "property_plant_and_equipment_net": 9007351.11,
+      "goodwill": 1375815.07,
+      "total_non_current_assets": 10383166.18
+    },
+    "total_assets": 28575272.93
+  },
+  "liabilities": {
+    "current_liabilities": {
+      "trade_payables": 4104779.23,
+      "accruals": 897534.4,
+      "deferred_income": 483272.15,
+      "income_tax_payable": 770007.16,
+      "total_current_liabilities": 6255592.94
+    },
+    "non_current_liabilities": {
+      "borrowings": 3911844.93,
+      "total_non_current_liabilities": 3911844.93
+    },
+    "total_liabilities": 10167437.87
+  },
+  "equity": {
+    "share_capital": 1250000.0,
+    "retained_earnings": 15376670.83,
+    "translation_reserve": 456056.7,
+    "non_controlling_interest": 1325107.53,
+    "total_equity": 18407835.06
+  },
+  "total_liabilities_and_equity": 28575272.93,
+  "net_assets": 18407835.06,
+  "accounting_equation_balanced": true
+}

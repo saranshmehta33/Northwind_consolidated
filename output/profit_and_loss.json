@@ -1,0 +1,23 @@
+{
+  "statement": "Consolidated Profit and Loss",
+  "period": "FY2024",
+  "presentation_currency": "GBP",
+  "revenue": 28301607.81,
+  "cost_of_sales": 15216592.61,
+  "gross_profit": 13085015.2,
+  "operating_expenses": {
+    "staff_costs": 5377709.98,
+    "rent_and_occupancy": 789466.86,
+    "depreciation": 1010034.3,
+    "other_operating_expenses": 1712713.25,
+    "total_operating_expenses": 8889924.39
+  },
+  "operating_profit": 4195090.81,
+  "finance_costs": 300580.07,
+  "foreign_exchange_gains_and_losses": 9991.67,
+  "profit_before_tax": 3884519.07,
+  "income_tax_expense": 1051738.11,
+  "group_profit": 2832780.96,
+  "profit_attributable_to_owners": 2771922.9,
+  "profit_attributable_to_nci": 60858.06
+}

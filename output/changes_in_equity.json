@@ -1,0 +1,40 @@
+{
+  "statement": "Consolidated Statement of Changes in Equity",
+  "period": "FY2024",
+  "presentation_currency": "GBP",
+  "opening_balance_2023_12_31": {
+    "share_capital": 1250000.0,
+    "retained_earnings": 12604747.93,
+    "translation_reserve": 412350.0,
+    "non_controlling_interest": 0.0,
+    "total": 14267097.93
+  },
+  "profit_for_the_year": {
+    "share_capital": 0.0,
+    "retained_earnings": 2771922.9,
+    "translation_reserve": 0.0,
+    "non_controlling_interest": 60858.06,
+    "total": 2832780.96
+  },
+  "other_comprehensive_income_translation": {
+    "share_capital": 0.0,
+    "retained_earnings": 0.0,
+    "translation_reserve": 43706.7,
+    "non_controlling_interest": 0.0,
+    "total": 43706.7
+  },
+  "recognition_of_nci_on_acquisition": {
+    "share_capital": 0.0,
+    "retained_earnings": 0.0,
+    "translation_reserve": 0.0,
+    "non_controlling_interest": 1264249.47,
+    "total": 1264249.47
+  },
+  "closing_balance_2024_12_31": {
+    "share_capital": 1250000.0,
+    "retained_earnings": 15376670.83,
+    "translation_reserve": 456056.7,
+    "non_controlling_interest": 1325107.53,
+    "total": 18407835.06
+  }
+}
