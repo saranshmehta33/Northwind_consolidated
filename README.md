@@ -14,7 +14,7 @@ This prototype runs with zero external pip dependencies using Python standard li
 ```bash
 # Clone the repository
 git clone https://github.com/saranshmehta33/Northwind_consolidated.git
-cd Northwind_TakeHome_v2
+cd Northwind_consolidated
 
 # Run end-to-end consolidation (single command)
 python run.py
