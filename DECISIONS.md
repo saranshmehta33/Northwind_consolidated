@@ -98,3 +98,25 @@
   Requires writing an explicit loop with accumulator logic instead of a one-line dictionary comprehension, but avoids catastrophic silent data loss.
 * **AI Tool Interaction:**  
   The AI tool generated the Python one-liner `uk_balances = {r.account_code: r.net_balance for r in tb_uk}`. This silently dropped the £812,500.00 operations wages line, causing the UK trial balance to appear unbalanced by -£812,500.00. We identified the root cause in the raw CSV, rejected the AI's implementation, and replaced it with an accumulating dictionary.
+
+---
+
+### Decision 7: Dual-Method Derivation and Cross-Check for Currency Translation Reserve
+
+* **Context:**  
+  Under IAS 21, the currency translation reserve in group equity reflects cumulative foreign exchange differences arising from translating foreign operations' opening net assets at closing vs opening rate, and their profit at closing vs average rate. In automated consolidation code, translation reserve is frequently calculated as a top-down residual (balance sheet plug):
+  `translation_reserve = total_assets - (total_liabilities + share_capital + retained_earnings + nci)`.
+  While mathematically balancing the balance sheet, a pure plug creates a self-fulfilling invariant: `assets == liabilities + equity` becomes true by definition, blinding automated verification to data loss, dropped accounts, or bad journals.
+* **Options Considered:**
+  1. *Option A: Pure Residual Plug.* Retain the top-down residual calculation. Simple to implement, but makes automated balance sheet validation untestable and absorbs errors silently.
+  2. *Option B: Pure Bottom-Up IAS 21 Calculation without Residual.* Calculate translation reserve purely from opening equity retranslation, profit retranslation, goodwill FX, and elimination differences. If any sub-penny rounding occurs from cross-rate compounding, the balance sheet fails to balance to the exact cent.
+  3. *Option C: Dual-Method with Enforced Cross-Check.* Derive the translation reserve using both independent methods:
+     - Top-down balance sheet residual (plug)
+     - Bottom-up IAS 21 retranslation of foreign opening equity, profit, and acquisition entries
+     Compare both figures at runtime: require that they agree within a £1.00 tolerance (to absorb cross-rate penny compounding across three currencies), write both figures and their variance to `output/reconciliation.json`, and assert that the residual is accepted only when the independent bottom-up method confirms it.
+* **Chosen Approach:** **Option C.**
+* **Trade-Off:**  
+  Requires implementing a dedicated IAS 21 bottom-up retranslation engine (`src/translation.py`) alongside the consolidation ledger, but transforms a dangerous, error-absorbing plug into a rigorous, verifiable accounting check (VAL-13).
+* **AI Tool Interaction:**  
+  The AI tool originally computed translation reserve purely as a residual plug and claimed the balance sheet was balanced. We pointed out that this circular reasoning guaranteed `accounting_equation_balanced == True` even if random accounts were dropped. We designed the dual-method cross-check and instructed the system to write `reconciliation.json` and halt the pipeline if the two methods ever diverge by more than £1.00.
+

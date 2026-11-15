@@ -19,8 +19,8 @@ cd Northwind_consolidated
 # Run end-to-end consolidation (single command)
 python run.py
 
-# Run the automated verification test suite
-python -m unittest discover tests
+# Run the automated verification test suite (11 unit tests covering all tasks and invariants)
+python -m unittest discover tests -v
 ```
 
 Every figure is produced dynamically by code and written to `/output`. No numbers are hand-edited.
@@ -31,10 +31,10 @@ Every figure is produced dynamically by code and written to `/output`. No number
 
 All 6 required submission items are included in this repository:
 
-1. **Architecture Document:** [`ARCHITECTURE.md`](ARCHITECTURE.md) (System topology, deterministic vs LLM boundaries, failure modes, validation/self-correction loops, auditor lineage; max 6 pages).
+1. **Architecture Document:** [`ARCHITECTURE.md`](ARCHITECTURE.md) (System topology, deterministic vs LLM boundaries, failure modes, validation/self-correction loops, auditor lineage; under 6 pages).
 2. **Working Prototype & Git History:** Full granular commit history preserved (no squashing) in this Git repository.
-3. **Design Decisions:** [`DECISIONS.md`](DECISIONS.md) (6 key architectural decisions detailing options considered, chosen approach, trade-offs, and AI suggestions evaluated/rejected).
-4. **Validation Report:** [`VALIDATION.md`](VALIDATION.md) (Mathematical proofs, independent reconciliations, and 3 specific AI bugs caught with fixing commits).
+3. **Design Decisions:** [`DECISIONS.md`](DECISIONS.md) (7 key architectural decisions detailing options considered, chosen approach, trade-offs, and AI suggestions evaluated/rejected).
+4. **Validation Report:** [`VALIDATION.md`](VALIDATION.md) (Mathematical proofs, independent bottom-up reconciliations, and 3 specific AI bugs caught with real fixing commits).
 5. **AI Transcripts:** Located in [`transcripts/`](transcripts/) (complete unedited agent session transcript).
 6. **One-Page Reflection:** [`REFLECTION.md`](REFLECTION.md) (3-month product roadmap, scale breaking points, and domain complexities).
 
@@ -46,11 +46,12 @@ Running `python run.py` generates the following files in `output/`:
 
 | Output File | Description |
 | :--- | :--- |
-| [`output/consolidated_tb.csv`](output/consolidated_tb.csv) | Consolidated trial balance in GBP with row-level source provenance (`US`, `UK`, `IN`, `ELIM`). |
+| [`output/consolidated_tb.csv`](output/consolidated_tb.csv) | Consolidated trial balance in GBP with row-level source provenance (`US`, `UK`, `IN`, `ELIM`). Sums to exact 0.00. |
 | [`output/balance_sheet.json`](output/balance_sheet.json) | Group balance sheet in GBP, including non-controlling interest and translation reserve. |
 | [`output/profit_and_loss.json`](output/profit_and_loss.json) | Group profit and loss statement in GBP, showing profit attributable to owners and NCI. |
 | [`output/changes_in_equity.json`](output/changes_in_equity.json) | Consolidated statement of changes in equity walk from 2023-12-31 to 2024-12-31. |
-| [`output/eliminations.csv`](output/eliminations.csv) | Every elimination entry with category, debit/credit amounts, description, and source rows. |
+| [`output/eliminations.csv`](output/eliminations.csv) | Every elimination entry with category, debit/credit amounts (one row per line, balanced per entry), description, and source rows. |
+| [`output/reconciliation.json`](output/reconciliation.json) | Dual-method cross-check between top-down balance sheet residual and bottom-up IAS 21 movement calculation. |
 | [`output/issues.json`](output/issues.json) | Complete audit log of every problem found (file, line, amount affected, action: blocked/assumed/flagged). |
 | [`output/control_figures_sm.json`](output/control_figures_sm.json) | All 12 control figures specified in the assignment appendix. |
 | [`output/control_figures.json`](output/control_figures.json) | Standard control figures duplicate for automated evaluators. |
@@ -100,3 +101,5 @@ All figures in GBP, rounded to 2 decimal places at reporting presentation per Gr
 4. **UK Deferred Income Mapping Trap:** Detected nominal code 2310 ("Deferred income", a liability credit) mapped to 4100 ("Revenue"), automatically remapped to 2300, and logged a £180,000 assumed correction.
 5. **Sage 50 Multi-Cost-Centre Nominal Codes:** Prevented silent line dropping on duplicate nominal codes (7000 Gross Wages for CC-OPS and CC-SALES, £812,500 each) via accumulating dictionary aggregation.
 6. **Intercompany Goods-in-Transit:** Identified missing invoice `INV-US-2291` ($10,160), recorded it at closing rate (£8,108.54) in UK books, retranslated monetary liabilities (£11,957.88 FX loss), and eliminated intercompany positions to exact £0.00.
+7. **Translation Reserve Self-Fulfilling Invariant:** Eliminated the circular residual plug by implementing dual-method bottom-up IAS 21 cross-check (`output/reconciliation.json`) within £1.00 tolerance (VAL-13).
+8. **Consolidated Trial Balance Zero-Sum:** Enforced zero-sum invariant (`abs(sum) < 0.01`) on `output/consolidated_tb.csv` (VAL-14) by posting equity restatement elimination journals.

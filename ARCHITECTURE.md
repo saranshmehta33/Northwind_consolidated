@@ -96,10 +96,10 @@ Financial reporting cannot tolerate probabilistic sampling. If an LLM is asked t
 | **Out-of-Period Adjustments** | JE-017 dated `2025-01-06` (Customer rebate agreed with Fabrikam). | Temporal boundary check: `entry.date.startswith("2024")`. | **Blocked**: Group Policy 6 restricts posting to FY2024. Logged in `issues.json` as `JOURNAL_OUT_OF_PERIOD`. |
 | **Duplicate Adjustments** | JE-014 and JE-019 both accrue $48,000 external audit fee to 6500/2200. | Substantive fingerprinting: `(entity, sorted(lines), amount)`. | **Held for Review**: First entry (JE-014) posted; duplicate (JE-019) held for human CFO confirmation. |
 | **Unmapped Account Code** | JE-016 references `IN-GST-ITC` (GST input tax credit). | Foreign key lookup against `map_in.csv` and `group_coa.csv`. | **Held for Review**: Entry held pending COA provisioning; net impact isolated from consolidated trial balance. |
-| **Missing Market FX Rate** | UK holds 40,000 SGD in DBS account; no closing GBP/SGD rate provided. | Completeness verification of rate matrix `(base, quote, closing)`. | **Strict Null Handling**: Never hallucinate or interpolate. Sets `sgd_bank_gbp: null` with documented audit reason. |
+| **Missing Market FX Rate** | UK holds 40,000 SGD in DBS account; no closing GBP/SGD rate provided. | Completeness verification of rate matrix `(base, quote, closing)`. | **Assumed (Strict Null)**: Never hallucinate or interpolate. Sets `sgd_bank_gbp: null` with documented audit reason; carries unadjusted book value in total assets. |
 | **Intercompany In-Transit Lag** | US invoice `INV-US-2291` ($10,160.00 dated 31 Dec) unrecorded by UK. | Bilateral invoice reconciliation between US receivables and UK payables. | **Assumed**: UK records item in transit at closing rate (£8,108.54) to 8210/2150 per Policy 5. |
 | **Unrecorded Foreign Currency FX** | UK holds $629,840 USD liability booked at historical £490,707.72. | Inspection of monetary balances denominated in non-functional currency. | **Assumed**: Retranslated at closing rate 1.2530 (£502,665.60), recognizing £11,957.88 FX loss to 7300 per Policy 3. |
-| **Subledger Control Discrepancy** | UK debtors & creditors differ from subledger controls by £45,000.00. | Reconciliation of `subledger_controls.csv` against GL accounts 1100 and 2100. | **Flagged**: Control variance logged in `issues.json`; GL balances consolidated without arbitrary adjustment. |
+| **Subledger Control Discrepancy** | UK debtors differ by £35,600.00 (post JE-011) & creditors by £45,000.00 against control totals. | Post-journal reconciliation of `subledger_controls.csv` against GL accounts 1100 and 2100. | **Flagged**: Control variance logged in `issues.json`; GL balances consolidated without arbitrary adjustment. |
 
 ---
 
@@ -131,11 +131,13 @@ The consolidation engine executes a multi-gate validation pipeline. No statement
   │   - Retranslate foreign currency monetary balances at closing rate.
   │   - Verify that intercompany positions eliminate to exact £0.00.
   │
-  ├─► [GATE 5: Acquisition & Equity Bridge Invariance]
+  ├─► [GATE 5: Acquisition, Equity Bridge & Translation Dual-Check]
   │   - Carve out pre-acquisition earnings (India H1 INR 18M).
   │   - Retranslate functional currency Goodwill at closing rate.
-  │   - Verify Accounting Equation: Assets == Liabilities + Equity.
-  │   - Verify Equity Walk: Opening + Profit + OCI + NCI Acq == Closing Equity.
+  │   - Verify Accounting Equation: Assets == Liabilities + Equity (VAL-11).
+  │   - Verify Equity Walk: Opening + Profit + OCI + NCI Acq == Closing Equity (VAL-12).
+  │   - Dual-Method Translation Reserve Cross-Check: Residual vs bottom-up IAS 21 movement within £1.00 tolerance (VAL-13).
+  │   - Consolidated Trial Balance Zero-Sum Invariant: Signed sum of consolidated TB == £0.00 (VAL-14).
   │
   └─► [OUTPUT ATTESTATION: Write Audited Deliverables to /output]
 ```
@@ -171,10 +173,10 @@ Every row of `consolidated_tb.csv` contains explicit, human-readable and machine
   `US:3,890,662.41; UK:1,263,010.00; IN:2,656,553.49`
 
 ### 6.2 Elimination Provenance in `eliminations.csv`
-Eliminations are never lumped into hidden adjustments. Every entry documents:
-* Unique ID (`ELIM-IC-01`, `ELIM-ACQ-IN`).
-* Category (`Intercompany Balance Sheet`, `Business Combinations`).
-* Debit and Credit amounts.
+Eliminations are never lumped into hidden adjustments. A single line-level journal ledger drives both the consolidated trial balance elimination column and `eliminations.csv`. Every entry enforces mathematical balancing (`total_debit == total_credit`) and documents:
+* Unique Entry ID (`ELIM-IC-01`, `ELIM-ACQ-IN`).
+* Account Code and Category (`Intercompany Balance Sheet`, `Business Combinations`).
+* Debit and Credit amounts per line (one row per line).
 * Full narrative description.
 * Exact source row references (`tb_us.csv:L4, tb_uk.csv:L10, acquisition_note.md`).
 
