@@ -77,12 +77,29 @@ class IssueRecord:
 
 
 @dataclass
+class EliminationLine:
+    account_code: str
+    account_name: str
+    debit: float = 0.0
+    credit: float = 0.0
+
+
+@dataclass
 class EliminationEntry:
     entry_id: str
     category: str
-    account_code: str
-    account_name: str
-    debit: float
-    credit: float
     description: str
     source_rows: str
+    lines: List["EliminationLine"] = field(default_factory=list)
+
+    @property
+    def total_debit(self) -> float:
+        return round(sum(l.debit for l in self.lines), 2)
+
+    @property
+    def total_credit(self) -> float:
+        return round(sum(l.credit for l in self.lines), 2)
+
+    @property
+    def is_balanced(self) -> bool:
+        return abs(self.total_debit - self.total_credit) < 0.01
