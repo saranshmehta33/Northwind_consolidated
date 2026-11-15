@@ -87,12 +87,15 @@ class TestConsolidation(unittest.TestCase):
         raw_rates = self.ingestor.load_fx_rates()
         fx_engine = FXEngine(raw_rates)
         invoices = self.ingestor.load_intercompany_invoices()
+        tb_uk = self.ingestor.load_tb_uk()
 
         uk_balances = {"2150": -490707.72, "8210": 490707.72}
         us_balances = {"1250": 640000.0, "4200": -640000.0}
 
         ic_engine = IntercompanyEngine(fx_engine)
-        uk_adj, ic_diff, elims, issues = ic_engine.reconcile_and_adjust(invoices, uk_balances, us_balances)
+        uk_adj, ic_diff, elims, issues = ic_engine.reconcile_and_adjust(
+            invoices, uk_balances, us_balances, tb_uk_rows=tb_uk
+        )
 
         # In-transit invoice: $10,160 / 1.2530 = £8,108.54
         self.assertEqual(ic_diff["timing_in_transit_gbp"], 8108.54)
@@ -120,6 +123,60 @@ class TestConsolidation(unittest.TestCase):
         # Verify control figures file exists
         self.assertTrue((OUTPUT_DIR / f"control_figures_{AUTHOR_INITIALS}.json").exists())
         self.assertTrue((OUTPUT_DIR / "control_figures.json").exists())
+
+    def test_translation_reserve_cross_check(self):
+        """The residual and the bottom-up translation reserve must agree."""
+        engine = ConsolidationEngine()
+        engine.run()
+        with open(OUTPUT_DIR / "reconciliation.json") as f:
+            rec = json.load(f)
+        self.assertTrue(rec["translation_reserve"]["passed"])
+        self.assertLessEqual(abs(rec["translation_reserve"]["difference_gbp"]), 1.00)
+
+    def test_consolidated_tb_balances(self):
+        """The consolidated trial balance column must sum to zero."""
+        with open(OUTPUT_DIR / "consolidated_tb.csv", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        total = round(sum(float(r["consolidated_gbp"]) for r in rows), 2)
+        self.assertAlmostEqual(total, 0.00, places=2)
+
+    def test_tb_ties_to_balance_sheet(self):
+        """Equity rows in the TB must equal the balance sheet equity section."""
+        with open(OUTPUT_DIR / "consolidated_tb.csv", encoding="utf-8") as f:
+            rows = {r["account_code"]: float(r["consolidated_gbp"]) for r in csv.DictReader(f)}
+        with open(OUTPUT_DIR / "balance_sheet.json", encoding="utf-8") as f:
+            bs = json.load(f)
+        self.assertAlmostEqual(-rows["3300"], bs["equity"]["translation_reserve"], places=2)
+
+    def test_every_elimination_balances(self):
+        """Each elimination journal must have equal debits and credits."""
+        with open(OUTPUT_DIR / "eliminations.csv", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        by_entry = {}
+        for r in rows:
+            e = by_entry.setdefault(r["entry_id"], [0.0, 0.0])
+            e[0] += float(r["debit"])
+            e[1] += float(r["credit"])
+        for entry_id, (dr, cr) in by_entry.items():
+            self.assertAlmostEqual(dr, cr, places=2, msg=f"{entry_id} unbalanced")
+
+    def test_input_change_propagates(self):
+        """Changing a source row must change the outputs. Guards against hard-coding."""
+        import shutil, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree("data", f"{tmp}/data")
+            # Raise the UK USD intercompany liability by 10,000 USD.
+            path = f"{tmp}/data/tb_uk.csv"
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read().replace("-629840.00", "-639840.00")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            ctrl = ConsolidationEngine(data_dir=Path(tmp) / "data", output_dir=Path(tmp) / "output").run()
+            self.assertNotEqual(
+                ctrl["intercompany_difference"]["fx_retranslation_gbp"],
+                11957.88,
+                "Output did not move: a figure is hard-coded.",
+            )
 
 
 if __name__ == "__main__":

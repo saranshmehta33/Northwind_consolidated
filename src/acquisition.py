@@ -5,7 +5,7 @@ and generates acquisition elimination entries per Group Policies and IFRS 3 / IA
 """
 
 from typing import Dict, List, Any, Tuple
-from src.models import EliminationEntry, IssueRecord
+from src.models import EliminationEntry, EliminationLine, IssueRecord
 from src.fx_engine import FXEngine
 
 
@@ -19,6 +19,10 @@ class AcquisitionEngine:
         in_adjustments_pl: Dict[str, float],
         group_coa: Dict[str, Dict[str, Any]],
         map_in: Dict[str, str],
+        acquisition_note: Dict[str, Any],
+        entities: Dict[str, Any],
+        tb_us_balances: Dict[str, float],
+        tb_uk_rows: Any,
     ) -> Tuple[Dict[str, Any], List[EliminationEntry], List[IssueRecord]]:
         """
         Calculates India acquisition metrics:
@@ -41,17 +45,18 @@ class AcquisitionEngine:
         gbp_inr_h2_avg = self.fx_engine.get_rate("GBP", "INR", "h2_average")      # 107.7918
         gbp_inr_spot = self.fx_engine.get_rate("GBP", "INR", "spot")              # 105.446655
 
-        # 1. Completion accounts data (1 July 2024)
-        consideration_inr = 690_000_000.0
-        consideration_usd = round(consideration_inr / usd_inr_spot, 2)  # $8,274,373.43
-        share_capital_inr = 250_000_000.0
-        opening_reserves_inr = 410_000_000.0
-        pre_acq_profit_inr = 18_000_000.0
+        # 1. Completion accounts data (1 July 2024) — read from acquisition_note.md
+        consideration_inr = acquisition_note["consideration_inr"]
+        share_capital_inr = acquisition_note["share_capital_inr"]
+        opening_reserves_inr = acquisition_note["opening_reserves_inr"]
+        pre_acq_profit_inr = acquisition_note["pre_acq_profit_inr"]
         net_assets_completion_inr = share_capital_inr + opening_reserves_inr + pre_acq_profit_inr  # 678,000,000
 
-        # Ownership
-        ownership_pct = 0.80
-        nci_pct = 0.20
+        consideration_usd = round(consideration_inr / usd_inr_spot, 2)  # $8,274,373.43
+
+        # Ownership — read from entities.csv
+        ownership_pct = float(entities["IN"]["ownership_pct"]) / 100.0
+        nci_pct = round(1.0 - ownership_pct, 10)
 
         # NCI at acquisition (proportionate share of net assets per Policy 4)
         nci_completion_inr = nci_pct * net_assets_completion_inr  # 135,600,000.0
@@ -61,7 +66,7 @@ class AcquisitionEngine:
         goodwill_inr = consideration_inr - parent_share_net_assets_inr  # 147,600,000.0
 
         # Retranslate Goodwill at 31 Dec 2024 closing rate
-        goodwill_closing_gbp = round(goodwill_inr / gbp_inr_closing, 2)  # £1,375,815.11
+        goodwill_closing_gbp = round(goodwill_inr / gbp_inr_closing, 2)  # £1,375,815.07
 
         issues.append(
             IssueRecord(
@@ -93,7 +98,12 @@ class AcquisitionEngine:
                 h2_pl_by_code[code] = h2_pl_by_code.get(code, 0.0) + net
 
         h1_profit_inr = -sum(h1_pl_by_code.values())
-        assert round(h1_profit_inr, 2) == pre_acq_profit_inr, "H1 profit must equal acquisition note pre-acq profit"
+        if round(h1_profit_inr, 2) != round(pre_acq_profit_inr, 2):
+            raise ValueError(
+                f"Pre-acquisition profit mismatch: in_pl_monthly.csv gives "
+                f"{h1_profit_inr:,.2f} but acquisition_note.md states "
+                f"{pre_acq_profit_inr:,.2f}"
+            )
 
         # Apply post-closing adjustments to H2 P&L (only for P&L accounts)
         for code, net_adj in in_adjustments_pl.items():
@@ -126,42 +136,129 @@ class AcquisitionEngine:
         # Net assets of India at 31 Dec 2024 = 250M (Capital) + 410M (Reserves) + 18M (H1) + 32.8M (H2) = 710.8M INR
         net_assets_closing_inr = net_assets_completion_inr + h2_profit_inr  # 710,800,000 INR
         nci_closing_inr = nci_pct * net_assets_closing_inr  # 142,160,000 INR
-        nci_closing_gbp = round(nci_closing_inr / gbp_inr_closing, 2)  # £1,325,107.51
+        nci_closing_gbp = round(nci_closing_inr / gbp_inr_closing, 2)  # £1,325,107.53
 
-        # 4. Elimination Entries
-        # Elimination of Investment in India against subsidiary pre-acquisition net assets & recognition of Goodwill and NCI
-        us_inv_usd = consideration_usd
-        us_inv_closing_gbp = round(us_inv_usd / gbp_usd_closing, 2)
+        # 4. Elimination Entries — full multi-line journals
+
+        # --- ELIM-ACQ-IN: Eliminate Investment in India ---
+        # Dr: India share capital (at closing rate GBP/INR)
+        # Dr: India opening reserves + pre-acq profit (at closing rate)
+        # Dr: Goodwill (at closing rate)
+        # Dr: Translation difference on acquisition
+        # Cr: US Investment in India 1610 (at closing rate USD/GBP)
+        # Cr: NCI at acquisition (proportionate net assets at closing rate)
+        india_share_cap_gbp = round(share_capital_inr / gbp_inr_closing, 2)
+        india_reserves_gbp = round((opening_reserves_inr + pre_acq_profit_inr) / gbp_inr_closing, 2)
+
+        # Read US investment in India from tb_us
+        if "1610" not in tb_us_balances:
+            raise KeyError("US account 1610 (Investment in Northwind India) missing from tb_us.csv")
+        us_inv_india_usd = tb_us_balances["1610"]
+        us_inv_india_closing_gbp = round(us_inv_india_usd / gbp_usd_closing, 2)
+
+        nci_completion_gbp = round(nci_completion_inr / gbp_inr_closing, 2)
+
+        # Translation difference balancing figure on India acquisition
+        diff_in = round(
+            (us_inv_india_closing_gbp + nci_completion_gbp)
+            - (india_share_cap_gbp + india_reserves_gbp + goodwill_closing_gbp),
+            2,
+        )
 
         elim_acq_in = EliminationEntry(
             entry_id="ELIM-ACQ-IN",
             category="Business Combinations",
-            account_code="1610 / 1700 / 3100 / 3200 / 3400",
-            account_name="Elimination of Investment in Northwind India & Recognition of Goodwill/NCI",
-            debit=round(share_capital_inr / gbp_inr_closing, 2) + round((opening_reserves_inr + pre_acq_profit_inr) / gbp_inr_closing, 2) + goodwill_closing_gbp,
-            credit=us_inv_closing_gbp + round(nci_completion_inr / gbp_inr_closing, 2),
             description=(
                 f"Elimination of Northwind Inc investment in India against pre-acquisition equity. "
-                f"Recognizes Goodwill £{goodwill_closing_gbp:,.2f} and initial NCI £{round(nci_completion_inr / gbp_inr_closing, 2):,.2f}."
+                f"Recognizes Goodwill £{goodwill_closing_gbp:,.2f}, initial NCI £{nci_completion_gbp:,.2f}, "
+                f"and translation difference £{diff_in:,.2f}."
             ),
             source_rows="tb_us.csv:L10, tb_in.csv:L12-13, acquisition_note.md",
+            lines=[
+                EliminationLine(
+                    account_code="3100",
+                    account_name="Share Capital (India)",
+                    debit=india_share_cap_gbp,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="3200",
+                    account_name="Reserves and Pre-Acquisition Profit (India)",
+                    debit=india_reserves_gbp,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="1700",
+                    account_name="Goodwill on Acquisition",
+                    debit=goodwill_closing_gbp,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="3300",
+                    account_name="Translation Difference on Acquisition",
+                    debit=diff_in,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="1610",
+                    account_name="Investment in Northwind India Pvt Ltd",
+                    debit=0.0,
+                    credit=us_inv_india_closing_gbp,
+                ),
+                EliminationLine(
+                    account_code="3400",
+                    account_name="Non-Controlling Interest (at acquisition)",
+                    debit=0.0,
+                    credit=nci_completion_gbp,
+                ),
+            ],
         )
         eliminations.append(elim_acq_in)
 
-        # Elimination of UK investment
-        us_inv_uk_usd = 1_270_000.0
+        # --- ELIM-ACQ-UK: Eliminate Investment in UK ---
+        # Read US investment in UK from tb_us (account 1600)
+        if "1600" not in tb_us_balances:
+            raise KeyError("US account 1600 (Investment in Northwind UK) missing from tb_us.csv")
+        us_inv_uk_usd = tb_us_balances["1600"]
         us_inv_uk_gbp = round(us_inv_uk_usd / gbp_usd_closing, 2)
-        uk_share_capital_gbp = 1_000_000.0
+
+        # Read UK share capital from tb_uk (nominal 3000, mapped to group 3100)
+        uk_sc_row = next((r for r in tb_uk_rows if r.account_code == "3000"), None)
+        if uk_sc_row is None:
+            raise KeyError("UK account 3000 (Share capital) missing from tb_uk.csv")
+        uk_share_capital_gbp = abs(uk_sc_row.net_balance)
+
+        diff_uk = round(us_inv_uk_gbp - uk_share_capital_gbp, 2)
 
         elim_acq_uk = EliminationEntry(
             entry_id="ELIM-ACQ-UK",
             category="Subsidiary Equity Elimination",
-            account_code="1600 / 3100",
-            account_name="Elimination of Investment in Northwind UK Ltd",
-            debit=uk_share_capital_gbp,
-            credit=us_inv_uk_gbp,
-            description="Elimination of Northwind Inc investment in Northwind UK Ltd against UK share capital.",
+            description=(
+                f"Elimination of Northwind Inc investment in Northwind UK Ltd (£{us_inv_uk_gbp:,.2f}) "
+                f"against UK share capital (£{uk_share_capital_gbp:,.2f}). "
+                f"Translation difference of £{diff_uk:,.2f} recognized per Policy 3."
+            ),
             source_rows="tb_us.csv:L9, tb_uk.csv:L14",
+            lines=[
+                EliminationLine(
+                    account_code="3100",
+                    account_name="Share Capital (Northwind UK)",
+                    debit=uk_share_capital_gbp,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="3300",
+                    account_name="Translation Difference on UK Investment",
+                    debit=diff_uk,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="1600",
+                    account_name="Investment in Northwind UK Ltd",
+                    debit=0.0,
+                    credit=us_inv_uk_gbp,
+                ),
+            ],
         )
         eliminations.append(elim_acq_uk)
 
@@ -175,6 +272,10 @@ class AcquisitionEngine:
             "h2_profit_inr": h2_profit_inr,
             "h2_pl_by_code": h2_pl_by_code,
             "net_assets_closing_inr": net_assets_closing_inr,
+            "consideration_inr": consideration_inr,
+            "net_assets_completion_inr": net_assets_completion_inr,
+            "pre_acq_profit_inr": pre_acq_profit_inr,
+            "ownership_pct": ownership_pct,
         }
 
         return acquisition_metrics, eliminations, issues

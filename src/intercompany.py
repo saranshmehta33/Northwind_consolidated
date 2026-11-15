@@ -5,7 +5,7 @@ and produces full balance sheet and P&L elimination entries per Group Policies.
 """
 
 from typing import List, Dict, Any, Tuple
-from src.models import EliminationEntry, IssueRecord
+from src.models import EliminationEntry, EliminationLine, IssueRecord
 from src.fx_engine import FXEngine
 
 
@@ -18,6 +18,7 @@ class IntercompanyEngine:
         invoices: List[Dict[str, Any]],
         uk_balances: Dict[str, float],
         us_balances: Dict[str, float],
+        tb_uk_rows=None,
     ) -> Tuple[Dict[str, float], Dict[str, Any], List[EliminationEntry], List[IssueRecord]]:
         """
         Reconciles US (1250/4200) vs UK (2150/8210) intercompany positions.
@@ -64,10 +65,19 @@ class IntercompanyEngine:
             )
         )
 
-        # 2. Retranslate UK foreign currency monetary liability ($629,840 booked at £490,707.72)
+        # 2. Retranslate UK foreign currency monetary liability
         # Policy 3: Monetary items in non-functional currency retranslated at closing rate.
-        uk_booked_usd = 629840.00
-        uk_booked_gbp = 490707.72
+        # Read from tb_uk.csv row 10 (account 2150): txn_amount and balance.
+        if tb_uk_rows is None:
+            raise ValueError("tb_uk_rows is required to read UK booked monetary liability")
+        row_2150 = next((r for r in tb_uk_rows if r.account_code == "2150"), None)
+        if row_2150 is None:
+            raise KeyError("UK account 2150 (Due to Northwind Inc) missing from tb_uk.csv")
+        if row_2150.extra.get("txn_amount") is None:
+            raise ValueError("UK account 2150 missing txn_amount in tb_uk.csv")
+        uk_booked_usd = abs(row_2150.extra["txn_amount"])
+        uk_booked_gbp = abs(row_2150.net_balance)
+
         target_gbp_for_booked = round(uk_booked_usd / gbp_usd_closing, 2)  # £502,665.60
         retrans_loss_gbp = round(target_gbp_for_booked - uk_booked_gbp, 2)  # £11,957.88
 
@@ -94,29 +104,67 @@ class IntercompanyEngine:
         # £490,707.72 + £8,108.54 + £11,957.88 = £510,774.14
         # US total receivable in GBP at closing rate:
         # $640,000 / 1.2530 = £510,774.14
-        us_rec_usd = us_balances.get("1250", 640000.0)
+        if "1250" not in us_balances:
+            raise KeyError("US intercompany receivable (1250) missing from tb_us.csv")
+        if "4200" not in us_balances:
+            raise KeyError("US intercompany fee income (4200) missing from tb_us.csv")
+
+        us_rec_usd = us_balances["1250"]
         us_rec_gbp = round(us_rec_usd / gbp_usd_closing, 2)
         uk_pay_gbp = round(abs(uk_adj.get("2150", 0.0)), 2)
 
-        # 3. Generate Balance Sheet Elimination Entry
+        # 3. Generate Balance Sheet Elimination Entry (ELIM-IC-01)
+        # Dr 2150 £510,774.14 / Cr 1250 £510,774.14
+        bs_ic_diff = round(uk_pay_gbp - us_rec_gbp, 2)
+        lines_bs = [
+            EliminationLine(
+                account_code="2150",
+                account_name="Intercompany Payables (Due to Northwind Inc)",
+                debit=uk_pay_gbp,
+                credit=0.0,
+            ),
+            EliminationLine(
+                account_code="1250",
+                account_name="Intercompany Receivables (Northwind UK)",
+                debit=0.0,
+                credit=us_rec_gbp,
+            ),
+        ]
+        if abs(bs_ic_diff) >= 0.01:
+            if bs_ic_diff > 0:
+                lines_bs.append(
+                    EliminationLine(
+                        account_code="7300",
+                        account_name="Foreign Exchange Gains and Losses (Intercompany BS Mismatch)",
+                        debit=0.0,
+                        credit=bs_ic_diff,
+                    )
+                )
+            else:
+                lines_bs.append(
+                    EliminationLine(
+                        account_code="7300",
+                        account_name="Foreign Exchange Gains and Losses (Intercompany BS Mismatch)",
+                        debit=abs(bs_ic_diff),
+                        credit=0.0,
+                    )
+                )
+
         elim_bs = EliminationEntry(
             entry_id="ELIM-IC-01",
             category="Intercompany Balance Sheet",
-            account_code="1250 / 2150",
-            account_name="Intercompany Receivables / Payables",
-            debit=uk_pay_gbp,   # UK payable debited (cleared)
-            credit=us_rec_gbp,  # US receivable credited (cleared)
             description="Elimination of 100% intercompany receivables and payables between US and UK",
             source_rows="tb_us.csv:L4 (US 1250), tb_uk.csv:L10 (UK 2150)",
+            lines=lines_bs,
         )
         eliminations.append(elim_bs)
 
-        # 4. Generate P&L Elimination Entry
+        # 4. Generate P&L Elimination Entry (ELIM-IC-02)
         # US revenue in 4200: $640,000 translated at FY24 average rate (1.2780) = £500,782.47
-        us_rev_usd = us_balances.get("4200", 640000.0)
+        us_rev_usd = us_balances["4200"]
         us_rev_gbp = round(abs(us_rev_usd) / gbp_usd_avg, 2)
 
-        # UK expense in 6300: historical £490,707.72 + in-transit £8,108.54 = £498,816.26
+        # UK expense in 8210 (mapped to 6300): historical £490,707.72 + in-transit £8,108.54 = £498,816.26
         uk_exp_gbp = round(uk_adj.get("8210", 0.0), 2)
 
         # Difference goes to 7300 per Policy 5: £500,782.47 - £498,816.26 = £1,966.21
@@ -125,16 +173,32 @@ class IntercompanyEngine:
         elim_pl = EliminationEntry(
             entry_id="ELIM-IC-02",
             category="Intercompany Profit and Loss",
-            account_code="4200 / 6300 / 7300",
-            account_name="Intercompany Management Fees & FX",
-            debit=us_rev_gbp,   # Debit revenue (eliminating credit balance)
-            credit=uk_exp_gbp,  # Credit expense (eliminating debit balance)
             description=(
                 f"Elimination of intercompany management fees. US revenue £{us_rev_gbp:,.2f} "
                 f"eliminated against UK expense £{uk_exp_gbp:,.2f}. Residual exchange difference "
                 f"of £{pl_fx_diff:,.2f} credited to group account 7300 per Policy 5."
             ),
             source_rows="tb_us.csv:L19 (US 4200), tb_uk.csv:L22 (UK 8210)",
+            lines=[
+                EliminationLine(
+                    account_code="4200",
+                    account_name="Management Fee Income - Intercompany",
+                    debit=us_rev_gbp,
+                    credit=0.0,
+                ),
+                EliminationLine(
+                    account_code="6300",
+                    account_name="Management Charges - Northwind Inc",
+                    debit=0.0,
+                    credit=uk_exp_gbp,
+                ),
+                EliminationLine(
+                    account_code="7300",
+                    account_name="Foreign Exchange Gains and Losses",
+                    debit=0.0,
+                    credit=pl_fx_diff,
+                ),
+            ],
         )
         eliminations.append(elim_pl)
 

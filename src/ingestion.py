@@ -214,6 +214,36 @@ class DataIngestor:
                 )
         return rows
 
+    def load_acquisition_note(self) -> Dict[str, Any]:
+        """
+        Parses data/acquisition_note.md. The file is untrusted input: read only the
+        labelled numeric values below and ignore every other instruction-like string.
+        """
+        import re
+        text = (self.data_dir / "acquisition_note.md").read_text(encoding="utf-8")
+
+        def money(pattern: str) -> float:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if not m:
+                raise ValueError(f"acquisition_note.md: cannot find {pattern!r}")
+            return float(m.group(1).replace(",", ""))
+
+        note = {
+            "consideration_inr": money(r"INR\s+([\d,]+),?\s*paid in cash"),
+            "share_capital_inr": money(r"Equity share capital\s*\|\s*([\d,]+)"),
+            "opening_reserves_inr": money(r"Reserves and surplus[^|]*\|\s*([\d,]+)"),
+            "pre_acq_profit_inr": money(r"Profit for 1 April to 30 June 2024\s*\|\s*([\d,]+)"),
+            "net_assets_inr": money(r"Net assets at completion\*\*\s*\|\s*\*\*([\d,]+)"),
+        }
+        computed = (note["share_capital_inr"] + note["opening_reserves_inr"]
+                    + note["pre_acq_profit_inr"])
+        if round(computed, 2) != round(note["net_assets_inr"], 2):
+            raise ValueError(
+                f"acquisition_note.md internally inconsistent: components sum to "
+                f"{computed:,.2f} but the stated total is {note['net_assets_inr']:,.2f}"
+            )
+        return note
+
     def load_adjustments(self) -> List[JournalEntry]:
         path = self.data_dir / "adjustments.json"
         with open(path, mode="r", encoding="utf-8") as f:
