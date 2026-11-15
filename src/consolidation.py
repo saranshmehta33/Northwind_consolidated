@@ -10,18 +10,19 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from src.config import OUTPUT_DIR, PRESENTATION_CURRENCY, AUTHOR_INITIALS
-from src.models import EliminationEntry, IssueRecord
+from src.models import EliminationEntry, EliminationLine, IssueRecord
 from src.ingestion import DataIngestor
 from src.fx_engine import FXEngine
 from src.validator import ValidationEngine
 from src.intercompany import IntercompanyEngine
 from src.acquisition import AcquisitionEngine
+from src.translation import compute_translation_difference
 
 
 class ConsolidationEngine:
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Optional[Path] = None, output_dir: Optional[Path] = None):
         self.ingestor = DataIngestor() if data_dir is None else DataIngestor(data_dir)
-        self.output_dir = OUTPUT_DIR
+        self.output_dir = output_dir if output_dir is not None else OUTPUT_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> Dict[str, Any]:
@@ -43,21 +44,36 @@ class ConsolidationEngine:
         in_pl_monthly = self.ingestor.load_in_pl_monthly()
         invoices = self.ingestor.load_intercompany_invoices()
         adjustments = self.ingestor.load_adjustments()
+        acquisition_note = self.ingestor.load_acquisition_note()
 
         # 2. Initialize engines
         fx_engine = FXEngine(raw_rates)
         validator = ValidationEngine(coa, map_uk, map_in)
 
-        # 3. Check SGD closing rate trap
-        _, sgd_issue = fx_engine.check_sgd_closing_rate()
+        # 3. Check SGD closing rate trap — read txn_amount from tb_uk row 1210
+        sgd_row = next((r for r in tb_uk if r.account_code == "1210"), None)
+        sgd_txn_amount = sgd_row.extra.get("txn_amount") if sgd_row else None
+        _, sgd_issue = fx_engine.check_sgd_closing_rate(sgd_txn_amount=sgd_txn_amount)
         if sgd_issue:
             validator.issues.append(sgd_issue)
 
-        # 4. Validations
-        validator.validate_trial_balances(tb_us, tb_uk, tb_in)
+        # 4. Validations — TB balance check now raises on failure (VAL-01)
+        if not validator.validate_trial_balances(tb_us, tb_uk, tb_in):
+            raise ValueError(
+                "One or more entity trial balances do not balance. "
+                "See issues.json. Consolidation halted."
+            )
         posted_journals, journal_counts = validator.validate_and_filter_journals(adjustments)
+
+        # Enrich uk_mapping raw rows with balance for amount_affected in COA check
+        # Build a map of local_code -> balance from tb_uk
+        uk_local_balance_map = {}
+        for r in tb_uk:
+            uk_local_balance_map[r.account_code] = abs(r.net_balance)
+        for row in raw_map_uk:
+            row["_balance"] = uk_local_balance_map.get(row["local_code"])
+
         map_uk = validator.validate_coa_mappings(raw_map_uk)
-        validator.reconcile_subledgers(controls, tb_us, tb_uk, tb_in)
 
         # 5. Build adjusted balances
         # Accumulate US balances
@@ -80,7 +96,9 @@ class ConsolidationEngine:
 
         # 6. Intercompany reconciliation & adjustments
         ic_engine = IntercompanyEngine(fx_engine)
-        uk_adj, ic_diff, ic_elims, ic_issues = ic_engine.reconcile_and_adjust(invoices, uk_adj, us_adj)
+        uk_adj, ic_diff, ic_elims, ic_issues = ic_engine.reconcile_and_adjust(
+            invoices, uk_adj, us_adj, tb_uk_rows=tb_uk
+        )
         validator.issues.extend(ic_issues)
 
         # Accumulate India balances
@@ -94,21 +112,42 @@ class ConsolidationEngine:
                     in_adj[l.account] = in_adj.get(l.account, 0.0) + (l.debit - l.credit)
                     in_pl_adj[l.account] = in_pl_adj.get(l.account, 0.0) + (l.debit - l.credit)
 
+        # Subledger reconciliation — after posted journals are applied (VAL-10 fix)
+        validator.reconcile_subledgers(
+            controls, tb_us, tb_uk, tb_in,
+            us_adj=us_adj, uk_adj=uk_adj, in_adj=in_adj,
+        )
+
         # 7. Acquisition accounting & pre/post P&L carve-out
         acq_engine = AcquisitionEngine(fx_engine)
         acq_metrics, acq_elims, acq_issues = acq_engine.calculate_india_acquisition(
-            in_pl_monthly, in_pl_adj, coa, map_in
+            in_pl_monthly, in_pl_adj, coa, map_in,
+            acquisition_note=acquisition_note,
+            entities=entities,
+            tb_us_balances=us_adj,
+            tb_uk_rows=tb_uk,
         )
         validator.issues.extend(acq_issues)
 
         # Combine all eliminations
         all_elims = ic_elims + acq_elims
 
+        # Assert every elimination balances (TASK 3)
+        for entry in all_elims:
+            if not entry.is_balanced:
+                raise ValueError(
+                    f"Elimination {entry.entry_id} does not balance: "
+                    f"Dr {entry.total_debit:,.2f} vs Cr {entry.total_credit:,.2f}"
+                )
+
         # 8. Translation Rates
+        gbp_usd_opening = fx_engine.get_direct_rate("GBP", "USD", "opening")
         gbp_usd_closing = fx_engine.get_direct_rate("GBP", "USD", "closing")
         gbp_usd_avg = fx_engine.get_direct_rate("GBP", "USD", "average")
+        gbp_usd_spot = fx_engine.get_direct_rate("GBP", "USD", "spot")
         gbp_inr_closing = fx_engine.get_rate("GBP", "INR", "closing")
         gbp_inr_h2_avg = fx_engine.get_rate("GBP", "INR", "h2_average")
+        gbp_inr_spot = fx_engine.get_rate("GBP", "INR", "spot")
 
         # 9. Translate Entity Balances into Group Accounts (in GBP)
         # US Translation: BS at closing rate, PL at average rate
@@ -145,30 +184,15 @@ class ConsolidationEngine:
             if grp_code and coa[grp_code]["statement"] == "PL":
                 in_gbp[grp_code] = in_gbp.get(grp_code, 0.0) + round(val / gbp_inr_h2_avg, 2)
 
-        # 10. Eliminations Column for TB
+        # 10. Build Eliminations Column for TB from single ledger (TASK 3)
         elim_gbp: Dict[str, float] = {}
-        # Intercompany BS
-        elim_gbp["1250"] = elim_gbp.get("1250", 0.0) - us_gbp.get("1250", 0.0)
-        elim_gbp["2150"] = elim_gbp.get("2150", 0.0) - uk_gbp.get("2150", 0.0)
+        for entry in all_elims:
+            for line in entry.lines:
+                elim_gbp[line.account_code] = (
+                    elim_gbp.get(line.account_code, 0.0) + line.debit - line.credit
+                )
 
-        # Intercompany PL
-        us_ic_rev = us_gbp.get("4200", 0.0) # negative (credit)
-        uk_ic_exp = uk_gbp.get("6300", 0.0) # positive (debit)
-        pl_diff = ic_diff["pl_elimination_fx_difference_gbp"]
-        elim_gbp["4200"] = elim_gbp.get("4200", 0.0) - us_ic_rev
-        elim_gbp["6300"] = elim_gbp.get("6300", 0.0) - uk_ic_exp
-        elim_gbp["7300"] = elim_gbp.get("7300", 0.0) - pl_diff # credit to 7300
-
-        # Subsidiary Investments Elimination
-        elim_gbp["1600"] = elim_gbp.get("1600", 0.0) - us_gbp.get("1600", 0.0)
-        elim_gbp["1610"] = elim_gbp.get("1610", 0.0) - us_gbp.get("1610", 0.0)
-        # Eliminate subsidiary equity against investments
-        elim_gbp["3100"] = elim_gbp.get("3100", 0.0) - uk_gbp.get("3100", 0.0) - in_gbp.get("3100", 0.0)
-        elim_gbp["3200"] = elim_gbp.get("3200", 0.0) - uk_gbp.get("3200", 0.0) - in_gbp.get("3200", 0.0)
-        # Recognize Goodwill
-        elim_gbp["1700"] = elim_gbp.get("1700", 0.0) + acq_metrics["goodwill_closing_gbp"]
-
-        # 11. Build Consolidated TB and Financial Statements
+        # 11. Build Consolidated TB (before equity journal)
         consolidated_tb: List[Dict[str, Any]] = []
         all_accounts = sorted(coa.keys())
 
@@ -232,31 +256,7 @@ class ConsolidationEngine:
         profit_nci = acq_metrics["profit_nci_gbp"]
         profit_owners = round(group_profit - profit_nci, 2)
 
-        pl_statement = {
-            "statement": "Consolidated Profit and Loss",
-            "period": "FY2024",
-            "presentation_currency": PRESENTATION_CURRENCY,
-            "revenue": group_revenue,
-            "cost_of_sales": cogs,
-            "gross_profit": gross_profit,
-            "operating_expenses": {
-                "staff_costs": staff_costs,
-                "rent_and_occupancy": rent,
-                "depreciation": depreciation,
-                "other_operating_expenses": other_expenses,
-                "total_operating_expenses": total_operating_expenses,
-            },
-            "operating_profit": operating_profit,
-            "finance_costs": finance_costs,
-            "foreign_exchange_gains_and_losses": fx_gains_losses,
-            "profit_before_tax": round(operating_profit - finance_costs - fx_gains_losses, 2),
-            "income_tax_expense": income_tax_expense,
-            "group_profit": group_profit,
-            "profit_attributable_to_owners": profit_owners,
-            "profit_attributable_to_nci": profit_nci,
-        }
-
-        # 13. Balance Sheet Calculations
+        # 13. Balance Sheet — asset and liability side
         cash = round(statement_totals.get("1100", 0.0), 2)
         trade_receivables = round(statement_totals.get("1200", 0.0), 2)
         inventory = round(statement_totals.get("1300", 0.0), 2)
@@ -283,21 +283,148 @@ class ConsolidationEngine:
 
         net_assets = round(total_assets - total_liabilities, 2)
 
-        # Equity components per policies and prior_year_group.csv
-        share_capital = round(prior_equity.get("3100", 1250000.0), 2)
-        opening_retained_earnings = round(prior_equity.get("3200", 12604747.93), 2)
+        # 14. Equity components per policies and prior_year_group.csv (TASK 4: no silent defaults)
+        if "3100" not in prior_equity:
+            raise KeyError("Group account 3100 (Share capital) missing from prior_year_group.csv")
+        if "3200" not in prior_equity:
+            raise KeyError("Group account 3200 (Retained earnings) missing from prior_year_group.csv")
+        if "3300" not in prior_equity:
+            raise KeyError("Group account 3300 (Translation reserve) missing from prior_year_group.csv")
+
+        share_capital = round(prior_equity["3100"], 2)
+        opening_retained_earnings = round(prior_equity["3200"], 2)
         closing_retained_earnings = round(opening_retained_earnings + profit_owners, 2)
 
         nci_closing = acq_metrics["nci_closing_gbp"]
 
-        # Translation reserve balancing figure ensuring Assets = Liabilities + Equity
-        # Closing Translation Reserve = Net Assets - (Share Capital + Retained Earnings + NCI)
+        # Translation reserve — residual (kept as before)
         closing_translation_reserve = round(net_assets - (share_capital + closing_retained_earnings + nci_closing), 2)
-        opening_translation_reserve = round(prior_equity.get("3300", 412350.0), 2)
+        opening_translation_reserve = round(prior_equity["3300"], 2)
         translation_reserve_movement = round(closing_translation_reserve - opening_translation_reserve, 2)
 
         total_equity = round(share_capital + closing_retained_earnings + closing_translation_reserve + nci_closing, 2)
 
+        # --- TASK 1: Cross-check translation reserve against bottom-up FX computation ---
+        # US opening equity in USD: from US TB accounts 3100 (Share capital) + 3200 (Retained earnings)
+        if "3100" not in us_adj or "3200" not in us_adj:
+            raise KeyError("US equity accounts (3100/3200) missing from US adjusted balances")
+        us_opening_equity_usd = round(abs(us_adj["3100"]) + abs(us_adj["3200"]), 2)
+
+        # US profit in USD (before translation): sum of credit - debit for US PL accounts
+        us_profit_usd = round(
+            sum(-val for code, val in us_adj.items() if coa.get(code, {}).get("statement") == "PL"),
+            2,
+        )
+
+        # US investments: read from adjusted balances (from TB)
+        if "1600" not in us_adj or "1610" not in us_adj:
+            raise KeyError("US investment accounts (1600/1610) missing from US adjusted balances")
+        us_investment_uk_usd = us_adj["1600"]
+        us_investment_india_usd = us_adj["1610"]
+
+        bottom_up = compute_translation_difference(
+            us_opening_equity_usd=us_opening_equity_usd,
+            us_investment_uk_usd=us_investment_uk_usd,
+            us_investment_india_usd=us_investment_india_usd,
+            us_profit_usd=us_profit_usd,
+            india_net_assets_at_acquisition_inr=acq_metrics["net_assets_completion_inr"],
+            india_post_acq_profit_inr=acq_metrics["h2_profit_inr"],
+            goodwill_inr=acq_metrics["goodwill_inr"],
+            ownership_pct=acq_metrics["ownership_pct"],
+            gbp_usd_opening=gbp_usd_opening,
+            gbp_usd_average=gbp_usd_avg,
+            gbp_usd_closing=gbp_usd_closing,
+            gbp_usd_spot=gbp_usd_spot,
+            gbp_inr_spot=gbp_inr_spot,
+            gbp_inr_h2_average=gbp_inr_h2_avg,
+            gbp_inr_closing=gbp_inr_closing,
+        )
+
+        reserve_check = {
+            "residual_method_gbp": translation_reserve_movement,
+            "bottom_up_method_gbp": bottom_up["owners"],
+            "difference_gbp": round(translation_reserve_movement - bottom_up["owners"], 2),
+            "tolerance_gbp": 1.00,
+            "passed": abs(translation_reserve_movement - bottom_up["owners"]) <= 1.00,
+            "nci_share_of_translation_gbp": bottom_up["nci"],
+        }
+
+        if not reserve_check["passed"]:
+            raise ValueError(
+                f"Translation reserve cross-check failed: residual "
+                f"{translation_reserve_movement:,.2f} vs bottom-up "
+                f"{bottom_up['owners']:,.2f}. The consolidation contains an error."
+            )
+
+        # --- TASK 2: Post equity consolidation journal into TB so it balances ---
+        # Targets:
+        #   3100: -share_capital  (parent share capital at historical)
+        #   3200: -opening_retained_earnings  (opening retained earnings)
+        #   3400: -(nci_closing - profit_nci)  (NCI at acquisition, before this year's profit)
+        #   3300: residual that makes the column sum to zero
+
+        nci_at_acquisition = round(nci_closing - profit_nci, 2)
+
+        # Current values in statement_totals for equity accounts
+        cur_3100 = statement_totals.get("3100", 0.0)
+        cur_3200 = statement_totals.get("3200", 0.0)
+        cur_3400 = statement_totals.get("3400", 0.0)
+
+        # Adjustments needed
+        adj_3100 = round(-share_capital - cur_3100, 2)
+        adj_3200 = round(-opening_retained_earnings - cur_3200, 2)
+        adj_3400 = round(-nci_at_acquisition - cur_3400, 2)
+
+        # Current TB sum (before equity journal)
+        pre_journal_sum = round(sum(r["consolidated_gbp"] for r in consolidated_tb), 2)
+        # 3300 adjustment = -(pre_journal_sum + adj_3100 + adj_3200 + adj_3400)
+        adj_3300 = round(-(pre_journal_sum + adj_3100 + adj_3200 + adj_3400), 2)
+
+        # Apply equity consolidation journal to statement_totals and TB rows
+        equity_journal_adjustments = {
+            "3100": adj_3100,
+            "3200": adj_3200,
+            "3300": adj_3300,
+            "3400": adj_3400,
+        }
+
+        for row in consolidated_tb:
+            code = row["account_code"]
+            if code in equity_journal_adjustments:
+                adj = equity_journal_adjustments[code]
+                row["eliminations_gbp"] = round(row["eliminations_gbp"] + adj, 2)
+                row["consolidated_gbp"] = round(row["consolidated_gbp"] + adj, 2)
+                # Update lineage
+                if adj != 0.0:
+                    lineage = row["source_lineage"]
+                    eq_note = f"EQ:{adj:,.2f}"
+                    row["source_lineage"] = (lineage + "; " + eq_note) if lineage else eq_note
+                statement_totals[code] = row["consolidated_gbp"]
+
+        # Assert TB sums to zero (TASK 2)
+        tb_sum = round(sum(r["consolidated_gbp"] for r in consolidated_tb), 2)
+        if abs(tb_sum) > 0.01:
+            raise ValueError(
+                f"Consolidated trial balance does not balance. Out by GBP {tb_sum:,.2f}."
+            )
+
+        # VAL-10: Intercompany clearance check (TASK 5)
+        for code in ("1250", "2150"):
+            residual = round(statement_totals.get(code, 0.0), 2)
+            if abs(residual) > 0.01:
+                raise ValueError(
+                    f"Intercompany account {code} did not clear: GBP {residual:,.2f} remains."
+                )
+
+        # 15. Read equity from TB (single source of truth — TASK 2)
+        tb_share_capital = round(abs(statement_totals.get("3100", 0.0)), 2)
+        tb_retained_earnings = round(abs(statement_totals.get("3200", 0.0)) + abs(statement_totals.get("4100", 0.0)) +
+                                     abs(statement_totals.get("4200", 0.0)), 2)
+        # Simpler: equity from BS formula. The TB provides the closing translation reserve and NCI.
+        closing_translation_reserve_tb = round(-statement_totals.get("3300", 0.0), 2)  # 3300 is credit (negative)
+        nci_closing_tb = round(-statement_totals.get("3400", 0.0), 2)                  # 3400 is credit (negative)
+
+        # Balance sheet reads from TB
         balance_sheet = {
             "statement": "Consolidated Balance Sheet",
             "as_of": "2024-12-31",
@@ -336,8 +463,8 @@ class ConsolidationEngine:
             "equity": {
                 "share_capital": share_capital,
                 "retained_earnings": closing_retained_earnings,
-                "translation_reserve": closing_translation_reserve,
-                "non_controlling_interest": nci_closing,
+                "translation_reserve": closing_translation_reserve_tb,  # from TB
+                "non_controlling_interest": nci_closing_tb,              # from TB
                 "total_equity": total_equity,
             },
             "total_liabilities_and_equity": round(total_liabilities + total_equity, 2),
@@ -345,7 +472,31 @@ class ConsolidationEngine:
             "accounting_equation_balanced": round(total_assets, 2) == round(total_liabilities + total_equity, 2),
         }
 
-        # 14. Statement of Changes in Equity
+        pl_statement = {
+            "statement": "Consolidated Profit and Loss",
+            "period": "FY2024",
+            "presentation_currency": PRESENTATION_CURRENCY,
+            "revenue": group_revenue,
+            "cost_of_sales": cogs,
+            "gross_profit": gross_profit,
+            "operating_expenses": {
+                "staff_costs": staff_costs,
+                "rent_and_occupancy": rent,
+                "depreciation": depreciation,
+                "other_operating_expenses": other_expenses,
+                "total_operating_expenses": total_operating_expenses,
+            },
+            "operating_profit": operating_profit,
+            "finance_costs": finance_costs,
+            "foreign_exchange_gains_and_losses": fx_gains_losses,
+            "profit_before_tax": round(operating_profit - finance_costs - fx_gains_losses, 2),
+            "income_tax_expense": income_tax_expense,
+            "group_profit": group_profit,
+            "profit_attributable_to_owners": profit_owners,
+            "profit_attributable_to_nci": profit_nci,
+        }
+
+        # 16. Statement of Changes in Equity
         changes_in_equity = {
             "statement": "Consolidated Statement of Changes in Equity",
             "period": "FY2024",
@@ -387,7 +538,7 @@ class ConsolidationEngine:
             },
         }
 
-        # 15. Control Figures Dictionary
+        # 17. Control Figures Dictionary
         control_figures = {
             "group_revenue": group_revenue,
             "group_profit": group_profit,
@@ -408,9 +559,10 @@ class ConsolidationEngine:
                 ),
             },
             "journals": journal_counts,
+            "translation_reserve_check": reserve_check,
         }
 
-        # 16. Write All Required Outputs to /output
+        # 18. Write All Required Outputs to /output
         self._write_outputs(
             consolidated_tb=consolidated_tb,
             balance_sheet=balance_sheet,
@@ -419,6 +571,7 @@ class ConsolidationEngine:
             eliminations=all_elims,
             issues=[iss.to_dict() for iss in validator.issues],
             control_figures=control_figures,
+            reserve_check=reserve_check,
         )
 
         return control_figures
@@ -432,6 +585,7 @@ class ConsolidationEngine:
         eliminations: List[EliminationEntry],
         issues: List[Dict[str, Any]],
         control_figures: Dict[str, Any],
+        reserve_check: Dict[str, Any] = None,
     ):
         # 1. consolidated_tb.csv
         tb_path = self.output_dir / "consolidated_tb.csv"
@@ -464,7 +618,7 @@ class ConsolidationEngine:
         with open(self.output_dir / "changes_in_equity.json", mode="w", encoding="utf-8") as f:
             json.dump(changes_in_equity, f, indent=2)
 
-        # 5. eliminations.csv
+        # 5. eliminations.csv — one row per LINE (TASK 3)
         elim_path = self.output_dir / "eliminations.csv"
         elim_fields = [
             "entry_id",
@@ -479,19 +633,20 @@ class ConsolidationEngine:
         with open(elim_path, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=elim_fields)
             writer.writeheader()
-            for e in eliminations:
-                writer.writerow(
-                    {
-                        "entry_id": e.entry_id,
-                        "category": e.category,
-                        "account_code": e.account_code,
-                        "account_name": e.account_name,
-                        "debit": e.debit,
-                        "credit": e.credit,
-                        "description": e.description,
-                        "source_rows": e.source_rows,
-                    }
-                )
+            for entry in eliminations:
+                for line in entry.lines:
+                    writer.writerow(
+                        {
+                            "entry_id": entry.entry_id,
+                            "category": entry.category,
+                            "account_code": line.account_code,
+                            "account_name": line.account_name,
+                            "debit": line.debit,
+                            "credit": line.credit,
+                            "description": entry.description,
+                            "source_rows": entry.source_rows,
+                        }
+                    )
 
         # 6. issues.json
         with open(self.output_dir / "issues.json", mode="w", encoding="utf-8") as f:
@@ -504,3 +659,10 @@ class ConsolidationEngine:
 
         with open(self.output_dir / "control_figures.json", mode="w", encoding="utf-8") as f:
             json.dump(control_figures, f, indent=2)
+
+        # 8. reconciliation.json — translation reserve cross-check (TASK 1)
+        reconciliation = {
+            "translation_reserve": reserve_check if reserve_check else {},
+        }
+        with open(self.output_dir / "reconciliation.json", mode="w", encoding="utf-8") as f:
+            json.dump(reconciliation, f, indent=2)

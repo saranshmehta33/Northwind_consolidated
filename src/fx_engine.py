@@ -64,7 +64,7 @@ class FXEngine:
 
         return amount / rate
 
-    def check_sgd_closing_rate(self) -> Tuple[Optional[float], Optional[IssueRecord]]:
+    def check_sgd_closing_rate(self, sgd_txn_amount: float = None) -> Tuple[Optional[float], Optional[IssueRecord]]:
         """
         Checks whether GBP/SGD closing rate exists.
         Per Section 4 of assignment instructions:
@@ -73,16 +73,20 @@ class FXEngine:
         """
         rate = self.get_rate("GBP", "SGD", "closing")
         if rate is None:
+            # amount_affected is the SGD txn amount from tb_uk.csv row 3 (account 1210)
+            amount = sgd_txn_amount if sgd_txn_amount is not None else None
             issue = IssueRecord(
                 file="fx_rates.csv",
                 line=None,
-                amount_affected=40000.0,  # 40,000 SGD in tb_uk.csv
-                action="blocked",
+                amount_affected=amount,
+                action="assumed",
                 issue_type="MISSING_FX_CLOSING_RATE",
                 description=(
                     "Missing closing exchange rate for GBP/SGD at 31 Dec 2024. "
-                    "Cannot retranslate UK SGD bank balance (40,000 SGD) at closing rate per policy 3. "
-                    "Value left as unadjusted book value in UK trial balance and reported as null in control figures."
+                    "Cannot retranslate UK SGD bank balance at closing rate per Policy 3. "
+                    "The balance is carried at its unretranslated book value (GBP 23,010.00) "
+                    "and total_assets is therefore affected by an undetermined amount. "
+                    "Value reported as null in control figures."
                 ),
             )
             return None, issue

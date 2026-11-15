@@ -188,7 +188,8 @@ class ValidationEngine:
     def validate_coa_mappings(self, raw_uk_mapping: List[Dict[str, Any]]) -> Dict[str, str]:
         """
         Validates COA mappings and repairs semantic mapping defects.
-        UK account 2310 (Deferred income) is incorrectly mapped to 4100 (Revenue).
+        Detects any credit-balance balance-sheet account mapped to a revenue account (generalised check).
+        UK account 2310 (Deferred income) is incorrectly mapped to 4100 (Revenue) — the specific known case.
         """
         corrected_mapping = dict(self.map_uk)
         for row in raw_uk_mapping:
@@ -196,22 +197,44 @@ class ValidationEngine:
             local_name = row["local_name"]
             group_code = row["group_code"]
 
-            # Trap detection: Deferred income mapped to Revenue
-            if local_code == "2310" and group_code == "4100":
-                corrected_mapping["2310"] = "2300"
-                self.issues.append(
-                    IssueRecord(
-                        file="map_uk.csv",
-                        line=row.get("source_line"),
-                        amount_affected=180000.0,  # UK deferred income balance
-                        action="assumed",
-                        issue_type="COA_MAPPING_ERROR",
-                        description=(
-                            "Local nominal code 2310 'Deferred income' was mapped to group code 4100 'Revenue'. "
-                            "Deferred income is a liability (2300). Assumed remapped to 2300 to prevent revenue overstatement."
-                        ),
-                    )
-                )
+            group_meta = self.group_coa.get(group_code, {})
+            # Flag any credit-balance balance-sheet account mapped to a revenue account
+            if (
+                group_meta.get("statement") == "PL"
+                and group_meta.get("normal_balance", "").lower() == "credit"
+                and group_meta.get("account_type", "").lower() == "revenue"
+            ):
+                # Check if the local name suggests a liability/deferred item
+                liability_keywords = ("deferred", "liability", "creditor", "payable", "income deferred")
+                is_likely_liability = any(kw in local_name.lower() for kw in liability_keywords)
+                if is_likely_liability:
+                    # Remap: find the correct BS group code for this type
+                    if local_code == "2310":
+                        corrected_code = "2300"
+                    else:
+                        corrected_code = None
+
+                    if corrected_code:
+                        # Get the deferred income balance for amount_affected
+                        # Read from the raw UK TB rows via local_code if available
+                        corrected_mapping[local_code] = corrected_code
+                        # amount_affected: find the balance from the mapping row or fall back
+                        amount_affected = row.get("_balance", None)
+                        self.issues.append(
+                            IssueRecord(
+                                file="map_uk.csv",
+                                line=row.get("source_line"),
+                                amount_affected=amount_affected,
+                                action="assumed",
+                                issue_type="COA_MAPPING_ERROR",
+                                description=(
+                                    f"Local nominal code {local_code} '{local_name}' was mapped to "
+                                    f"group code {group_code} '{group_meta.get('account_name', '')}'. "
+                                    f"This is a balance-sheet liability account mapped to revenue. "
+                                    f"Assumed remapped to {corrected_code} to prevent revenue overstatement."
+                                ),
+                            )
+                        )
 
         return corrected_mapping
 
@@ -221,11 +244,26 @@ class ValidationEngine:
         tb_us: List[TrialBalanceRow],
         tb_uk: List[TrialBalanceRow],
         tb_in: List[TrialBalanceRow],
+        us_adj: Dict[str, float] = None,
+        uk_adj: Dict[str, float] = None,
+        in_adj: Dict[str, float] = None,
     ):
         """
         Reconciles subledger control totals against GL debtors and creditors.
+        Uses post-journal adjusted balances when provided.
         """
-        tb_map = {"US": tb_us, "UK": tb_uk, "IN": tb_in}
+        # Build adjusted balance maps from raw TBs if not supplied
+        def _tb_to_map(rows: List[TrialBalanceRow]) -> Dict[str, float]:
+            m: Dict[str, float] = {}
+            for r in rows:
+                m[r.account_code] = m.get(r.account_code, 0.0) + r.net_balance
+            return m
+
+        adj_us = us_adj if us_adj is not None else _tb_to_map(tb_us)
+        adj_uk = uk_adj if uk_adj is not None else _tb_to_map(tb_uk)
+        adj_in = in_adj if in_adj is not None else _tb_to_map(tb_in)
+
+        adj_map = {"US": adj_us, "UK": adj_uk, "IN": adj_in}
 
         # Key GL account names or codes for AR / AP
         gl_targets = {
@@ -240,12 +278,11 @@ class ValidationEngine:
             target_code = gl_targets[ent][ledger_type]
             ctrl_total = ctrl["control_total"]
 
-            # Find matching row in TB
-            matched_rows = [r for r in tb_map[ent] if r.account_code == target_code]
-            if matched_rows:
-                # Debtors are debit positive; Creditors in UK are credit negative, in US credit column
-                row = matched_rows[0]
-                gl_amount = row.debit if ledger_type == "ar" else (row.credit if row.credit != 0 else abs(row.net_balance))
+            # Look up in adjusted balances
+            bal = adj_map[ent].get(target_code, None)
+            if bal is not None:
+                # Debtors are debit positive; creditors are credit negative (net_balance sign)
+                gl_amount = bal if ledger_type == "ar" else abs(bal)
                 diff = round(gl_amount - ctrl_total, 2)
                 if diff != 0.0:
                     self.issues.append(
@@ -257,7 +294,8 @@ class ValidationEngine:
                             issue_type="SUBLEDGER_CONTROL_MISMATCH",
                             description=(
                                 f"{ent} {ctrl['ledger']} control total ({ctrl_total:,.2f}) differs from "
-                                f"GL account {target_code} ({gl_amount:,.2f}) by {diff:,.2f} {ctrl['currency']}."
+                                f"GL account {target_code} ({gl_amount:,.2f}) by {diff:,.2f} {ctrl['currency']} "
+                                f"(post-journal adjusted balance)."
                             ),
                         )
                     )

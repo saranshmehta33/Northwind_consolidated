@@ -41,5 +41,13 @@
     "posted": 16,
     "rejected": 2,
     "held_for_review": 2
+  },
+  "translation_reserve_check": {
+    "residual_method_gbp": 43706.7,
+    "bottom_up_method_gbp": 43706.74,
+    "difference_gbp": -0.04,
+    "tolerance_gbp": 1.0,
+    "passed": true,
+    "nci_share_of_translation_gbp": -21708.82
   }
 }

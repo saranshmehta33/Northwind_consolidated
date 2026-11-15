@@ -3,9 +3,9 @@
     "file": "fx_rates.csv",
     "line": null,
     "amount_affected": 40000.0,
-    "action": "blocked",
+    "action": "assumed",
     "issue_type": "MISSING_FX_CLOSING_RATE",
-    "description": "Missing closing exchange rate for GBP/SGD at 31 Dec 2024. Cannot retranslate UK SGD bank balance (40,000 SGD) at closing rate per policy 3. Value left as unadjusted book value in UK trial balance and reported as null in control figures."
+    "description": "Missing closing exchange rate for GBP/SGD at 31 Dec 2024. Cannot retranslate UK SGD bank balance at closing rate per Policy 3. The balance is carried at its unretranslated book value (GBP 23,010.00) and total_assets is therefore affected by an undetermined amount. Value reported as null in control figures."
   },
   {
     "file": "adjustments.json",
@@ -53,23 +53,7 @@
     "amount_affected": 180000.0,
     "action": "assumed",
     "issue_type": "COA_MAPPING_ERROR",
-    "description": "Local nominal code 2310 'Deferred income' was mapped to group code 4100 'Revenue'. Deferred income is a liability (2300). Assumed remapped to 2300 to prevent revenue overstatement."
-  },
-  {
-    "file": "subledger_controls.csv",
-    "line": 4,
-    "amount_affected": 45000.0,
-    "action": "flagged",
-    "issue_type": "SUBLEDGER_CONTROL_MISMATCH",
-    "description": "UK Accounts receivable (trade) control total (1,940,000.00) differs from GL account 1100 (1,985,000.00) by 45,000.00 GBP."
-  },
-  {
-    "file": "subledger_controls.csv",
-    "line": 5,
-    "amount_affected": 45000.0,
-    "action": "flagged",
-    "issue_type": "SUBLEDGER_CONTROL_MISMATCH",
-    "description": "UK Accounts payable (trade) control total (1,165,000.00) differs from GL account 2100 (1,210,000.00) by 45,000.00 GBP."
+    "description": "Local nominal code 2310 'Deferred income' was mapped to group code 4100 'Revenue'. This is a balance-sheet liability account mapped to revenue. Assumed remapped to 2300 to prevent revenue overstatement."
   },
   {
     "file": "intercompany.csv",
@@ -86,6 +70,22 @@
     "action": "assumed",
     "issue_type": "FX_RETRANSLATION_MONETARY_LIABILITY",
     "description": "UK USD monetary liability ($629,840.00) was recorded at historical \u00a3490,707.72. Retranslated at closing rate (1.253) to \u00a3502,665.60, recognizing \u00a311,957.88 FX loss to account 7300 per Policy 3."
+  },
+  {
+    "file": "subledger_controls.csv",
+    "line": 4,
+    "amount_affected": 35600.0,
+    "action": "flagged",
+    "issue_type": "SUBLEDGER_CONTROL_MISMATCH",
+    "description": "UK Accounts receivable (trade) control total (1,940,000.00) differs from GL account 1100 (1,975,600.00) by 35,600.00 GBP (post-journal adjusted balance)."
+  },
+  {
+    "file": "subledger_controls.csv",
+    "line": 5,
+    "amount_affected": 45000.0,
+    "action": "flagged",
+    "issue_type": "SUBLEDGER_CONTROL_MISMATCH",
+    "description": "UK Accounts payable (trade) control total (1,165,000.00) differs from GL account 2100 (1,210,000.00) by 45,000.00 GBP (post-journal adjusted balance)."
   },
   {
     "file": "acquisition_note.md",
